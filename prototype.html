@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Single-Arm 이동 및 운반 프로토타입</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #1a202c;
+            color: white;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            user-select: none;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            width: 100vw;
+        }
+        canvas {
+            display: block;
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            background-color: #1a202c;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            pointer-events: none;
+            z-index: 10;
+        }
+        .key {
+            display: inline-block;
+            background: #4a5568;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-weight: bold;
+            margin: 0 4px;
+            border-bottom: 2px solid #2d3748;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <h1 class="text-3xl font-bold mb-2 text-blue-400">Single-Arm Prototype</h1>
+        <p class="text-gray-300 mb-1">마우스를 움직여 <span class="text-blue-300 font-bold">팔(집게)</span>을 조작합니다.</p>
+        <p class="text-gray-300 mb-1">노란색 바닥/벽에서 <span class="key">좌클릭 유지</span> : <span class="text-green-400">지형 잡고 몸 당기기 (이동)</span></p>
+        <p class="text-gray-300 mb-1">도형 위에서 <span class="key">좌클릭 유지</span> : <span class="text-orange-400">물건 잡고 이동시키기 (이동 불가)</span></p>
+        <p class="text-gray-300 text-sm opacity-80 mt-2">* 팁: 큰 붉은 박스를 들어 로봇 머리 위로 떨어뜨려 보세요!</p>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        const CANVAS_WIDTH = 1280;
+        const CANVAS_HEIGHT = 720;
+        canvas.width = CANVAS_WIDTH;
+        canvas.height = CANVAS_HEIGHT;
+
+        function getMousePos(e) {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            return {
+                x: (e.clientX - rect.left) * scaleX,
+                y: (e.clientY - rect.top) * scaleY
+            };
+        }
+
+        // --- 물리 및 게임 설정 ---
+        const GRAVITY = 0.6;
+        const FRICTION = 0.8;      
+        const DAMPING = 0.95;      
+        const MAX_ARM_LENGTH = 200; 
+        const PULL_FORCE = 0.35;    
+
+        const robot = {
+            w: 60, h: 40, x: 300, y: 100, vx: 0, vy: 0,
+            color: '#4A7c89', eyeColor: '#00B4D8'
+        };
+
+        const mouse = { x: 0, y: 0 };
+        const hand = { x: 0, y: 0 };
+        // 초기 프레임에서 손 속도(델타) 이상치 방지용으로 prevHand를 현재 위치로 초기화
+        let prevHand = { x: mouse.x, y: mouse.y };
+        let handVx = 0;
+        let handVy = 0;
+
+        let isGrabbing = false;
+        let grabType = null; 
+        let grabTargetPos = { x: 0, y: 0 }; 
+        let grabbedObject = null; 
+        let currentGrabSuggestion = { can: false };
+
+        const platforms = [
+            { x: -100, y: 620, w: 2000, h: 200 },  
+            { x: 50, y: 470, w: 150, h: 150 },     
+            { x: 900, y: 420, w: 250, h: 200 }     // 오른쪽 높은 언덕
+        ];
+
+        const physObjects = [
+            { id: 1, type: 'circle', r: 18, x: 120, y: 400, vx: 0, vy: 0, color: '#F6AD55' },
+            { id: 2, type: 'rect', w: 35, h: 35, x: 500, y: 550, vx: 0, vy: 0, color: '#68D391' },
+            { id: 3, type: 'rect', w: 100, h: 100, x: 950, y: 250, vx: 0, vy: 0, color: '#FC8181' } // 무거운 붉은 박스
+        ];
+
+        canvas.addEventListener('mousemove', (e) => {
+            const pos = getMousePos(e);
+            mouse.x = pos.x;
+            mouse.y = pos.y;
+        });
+
+        canvas.addEventListener('mousedown', (e) => {
+            if (e.button === 0 && currentGrabSuggestion.can) {
+                isGrabbing = true;
+                grabType = currentGrabSuggestion.type;
+                
+                if (grabType === 'object') {
+                    grabbedObject = currentGrabSuggestion.target;
+                } else if (grabType === 'platform') {
+                    grabTargetPos.x = currentGrabSuggestion.x;
+                    grabTargetPos.y = currentGrabSuggestion.y;
+                }
+            }
+        });
+
+        canvas.addEventListener('mouseup', (e) => {
+            if (e.button === 0) {
+                if (isGrabbing && grabType === 'object' && grabbedObject) {
+                    // 손 속도가 순간적으로 매우 커지는 경우가 있어 투척 속도를 제한
+                    const MAX_THROW = 50;
+                    let throwVx = Math.max(-MAX_THROW, Math.min(MAX_THROW, handVx));
+                    let throwVy = Math.max(-MAX_THROW, Math.min(MAX_THROW, handVy));
+                    grabbedObject.vx = throwVx * 0.8;
+                    grabbedObject.vy = throwVy * 0.8;
+                }
+                isGrabbing = false;
+                grabType = null;
+                grabbedObject = null;
+            }
+        });
+
+        function checkCanGrab(hx, hy) {
+            const GRAB_TOLERANCE = 25; 
+
+            for (let obj of physObjects) {
+                if (obj.type === 'circle') {
+                    let dx = hx - obj.x;
+                    let dy = hy - obj.y;
+                    if (Math.sqrt(dx*dx + dy*dy) < obj.r + GRAB_TOLERANCE) {
+                        return { can: true, type: 'object', target: obj, x: obj.x, y: obj.y };
+                    }
+                } else if (obj.type === 'rect') {
+                    let cx = obj.x + obj.w / 2;
+                    let cy = obj.y + obj.h / 2;
+                    if (hx > obj.x - GRAB_TOLERANCE && hx < obj.x + obj.w + GRAB_TOLERANCE &&
+                        hy > obj.y - GRAB_TOLERANCE && hy < obj.y + obj.h + GRAB_TOLERANCE) {
+                        return { can: true, type: 'object', target: obj, x: cx, y: cy };
+                    }
+                }
+            }
+
+            for (let p of platforms) {
+                let closestX = Math.max(p.x, Math.min(hx, p.x + p.w));
+                let closestY = Math.max(p.y, Math.min(hy, p.y + p.h));
+                let dx = hx - closestX;
+                let dy = hy - closestY;
+                if ((dx * dx + dy * dy) < GRAB_TOLERANCE * GRAB_TOLERANCE) {
+                    return { can: true, type: 'platform', x: closestX, y: closestY };
+                }
+            }
+            return { can: false };
+        }
+
+        // --- 충돌 로직: 플레이어가 단단한 기둥으로 우선순위를 가짐 ---
+        function resolveRobotCollisions() {
+            let onGround = false;
+            
+            // 1. 일반 지형과의 충돌
+            for (let p of platforms) {
+                if (robot.x < p.x + p.w && robot.x + robot.w > p.x &&
+                    robot.y < p.y + p.h && robot.y + robot.h > p.y) {
+                    
+                    let overlapLeft = (robot.x + robot.w) - p.x;
+                    let overlapRight = (p.x + p.w) - robot.x;
+                    let overlapTop = (robot.y + robot.h) - p.y;
+                    let overlapBottom = (p.y + p.h) - robot.y;
+                    let min = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
+
+                    if (min === overlapTop) {
+                        robot.y = p.y - robot.h;
+                        robot.vy = 0;
+                        robot.vx *= FRICTION; 
+                        onGround = true;
+                    } else if (min === overlapBottom) {
+                        robot.y = p.y + p.h;
+                        robot.vy = 0;
+                    } else if (min === overlapLeft) {
+                        robot.x = p.x - robot.w;
+                        robot.vx = 0;
+                    } else if (min === overlapRight) {
+                        robot.x = p.x + p.w;
+                        robot.vx = 0;
+                    }
+                }
+            }
+
+            // 2. 무거운 붉은 박스 (id: 3) 와의 상호작용
+            for (let obj of physObjects) {
+                if (obj.id === 3) { 
+                    if (robot.x < obj.x + obj.w && robot.x + robot.w > obj.x &&
+                        robot.y < obj.y + obj.h && robot.y + robot.h > obj.y) {
+                        
+                        let overlapLeft = (robot.x + robot.w) - obj.x;
+                        let overlapRight = (obj.x + obj.w) - robot.x;
+                        let overlapTop = (robot.y + robot.h) - obj.y;
+                        let overlapBottom = (obj.y + obj.h) - robot.y;
+                        let min = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
+
+                        if (min === overlapTop) {
+                            // 로봇이 박스 위로 올라탔을 때
+                            robot.y = obj.y - robot.h;
+                            robot.vy = 0;
+                            robot.vx *= FRICTION; 
+                            onGround = true;
+                        } else if (min === overlapBottom) {
+                            // ⭐️ 수정됨: 박스가 위에서 떨어질 때, 로봇을 땅으로 밀어내지 않고 머리 위에 얹음
+                            obj.y = robot.y - obj.h;
+                            obj.vy = 0; 
+                        } else if (min === overlapLeft) {
+                            robot.x = obj.x - robot.w;
+                            robot.vx *= 0.5; 
+                            if (!(isGrabbing && grabbedObject === obj)) obj.vx += 1.5; 
+                        } else if (min === overlapRight) {
+                            robot.x = obj.x + obj.w;
+                            robot.vx *= 0.5;
+                            if (!(isGrabbing && grabbedObject === obj)) obj.vx -= 1.5;
+                        }
+                    }
+                }
+            }
+            return onGround;
+        }
+
+        function updatePhysObjects() {
+            for (let obj of physObjects) {
+                if (isGrabbing && grabType === 'object' && grabbedObject === obj) {
+                    if (obj.type === 'circle') {
+                        obj.x = hand.x;
+                        obj.y = hand.y;
+                    } else if (obj.type === 'rect') {
+                        obj.x = hand.x - obj.w / 2;
+                        obj.y = hand.y - obj.h / 2;
+                        
+                        // 잡은 상자가 큰 붉은 네모일 경우 플레이어를 뚫고 지나갈 수 없음 (플레이어가 벽 역할)
+                        if (obj.id === 3) {
+                            if (robot.x < obj.x + obj.w && robot.x + robot.w > obj.x &&
+                                robot.y < obj.y + obj.h && robot.y + robot.h > obj.y) {
+                                
+                                let overlapLeft = (robot.x + robot.w) - obj.x;
+                                let overlapRight = (obj.x + obj.w) - robot.x;
+                                let overlapTop = (robot.y + robot.h) - obj.y;
+                                let overlapBottom = (obj.y + obj.h) - robot.y;
+                                let min = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
+
+                                if (min === overlapTop) obj.y = robot.y + robot.h;
+                                else if (min === overlapBottom) obj.y = robot.y - obj.h;
+                                else if (min === overlapLeft) obj.x = robot.x + robot.w;
+                                else if (min === overlapRight) obj.x = robot.x - obj.w;
+                            }
+                        }
+
+                        for (let p of platforms) {
+                            if (obj.x < p.x + p.w && obj.x + obj.w > p.x &&
+                                obj.y < p.y + p.h && obj.y + obj.h > p.y) {
+                                
+                                let overlapLeft = (obj.x + obj.w) - p.x;
+                                let overlapRight = (p.x + p.w) - obj.x;
+                                let overlapTop = (obj.y + obj.h) - p.y;
+                                let overlapBottom = (p.y + p.h) - obj.y;
+                                let min = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
+
+                                if (min === overlapTop) obj.y = p.y - obj.h;
+                                else if (min === overlapBottom) obj.y = p.y + p.h;
+                                else if (min === overlapLeft) obj.x = p.x - obj.w;
+                                else if (min === overlapRight) obj.x = p.x + p.w;
+                            }
+                        }
+                        
+                        hand.x = obj.x + obj.w / 2;
+                        hand.y = obj.y + obj.h / 2;
+                    }
+                    obj.vx = 0;
+                    obj.vy = 0;
+                    continue; 
+                }
+
+                obj.vy += GRAVITY;
+                obj.x += obj.vx;
+                obj.y += obj.vy;
+                obj.vx *= DAMPING;
+
+                if (obj.type === 'circle') {
+                    for (let p of platforms) {
+                        if (obj.x > p.x && obj.x < p.x + p.w) {
+                            if (obj.y + obj.r > p.y && obj.y - obj.r < p.y + p.h) {
+                                obj.y = p.y - obj.r;
+                                obj.vy *= -0.3; 
+                                obj.vx *= FRICTION;
+                            }
+                        }
+                    }
+                } else if (obj.type === 'rect') {
+                    for (let p of platforms) {
+                        if (obj.x < p.x + p.w && obj.x + obj.w > p.x &&
+                            obj.y < p.y + p.h && obj.y + obj.h > p.y) {
+                            
+                            let overlapLeft = (obj.x + obj.w) - p.x;
+                            let overlapRight = (p.x + p.w) - obj.x;
+                            let overlapTop = (obj.y + obj.h) - p.y;
+                            let overlapBottom = (p.y + p.h) - obj.y;
+                            let min = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
+
+                            if (min === overlapTop) {
+                                obj.y = p.y - obj.h;
+                                obj.vy *= -0.2; 
+                                obj.vx *= FRICTION;
+                            } else if (min === overlapBottom) {
+                                obj.y = p.y + p.h;
+                                obj.vy = 0;
+                            } else if (min === overlapLeft) {
+                                obj.x = p.x - obj.w;
+                                obj.vx = 0;
+                            } else if (min === overlapRight) {
+                                obj.x = p.x + p.w;
+                                obj.vx = 0;
+                            }
+                        }
+                    }
+                }
+                
+                if (obj.y > CANVAS_HEIGHT + 500) {
+                    obj.y = 100;
+                    obj.x = 600;
+                    obj.vy = 0;
+                }
+            }
+        }
+
+        function loop() {
+            update();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        function update() {
+            let centerX = robot.x + robot.w / 2;
+            let centerY = robot.y + robot.h / 2 - 10; 
+
+            let targetX = isGrabbing && grabType === 'platform' ? grabTargetPos.x : mouse.x;
+            let targetY = isGrabbing && grabType === 'platform' ? grabTargetPos.y : mouse.y;
+
+            // 1. 팔의 최대 길이 제한을 먼저 적용
+            let dx = targetX - centerX;
+            let dy = targetY - centerY;
+            let dist = Math.sqrt(dx * dx + dy * dy);
+            
+            if (dist > MAX_ARM_LENGTH) {
+                targetX = centerX + (dx / dist) * MAX_ARM_LENGTH;
+                targetY = centerY + (dy / dist) * MAX_ARM_LENGTH;
+            }
+
+            // 2. 지형 내부 침범 방지 (AABB Push Out)
+            for (let p of platforms) {
+                if (targetX > p.x && targetX < p.x + p.w && targetY > p.y && targetY < p.y + p.h) {
+                    let dl = targetX - p.x;
+                    let dr = (p.x + p.w) - targetX;
+                    let dt = targetY - p.y;
+                    let db = (p.y + p.h) - targetY;
+                    let min = Math.min(dl, dr, dt, db);
+                    
+                    if (min === dt) targetY = p.y;
+                    else if (min === db) targetY = p.y + p.h;
+                    else if (min === dl) targetX = p.x;
+                    else if (min === dr) targetX = p.x + p.w;
+                }
+            }
+
+            hand.x = targetX;
+            hand.y = targetY;
+
+            handVx = hand.x - prevHand.x;
+            handVy = hand.y - prevHand.y;
+            prevHand.x = hand.x;
+            prevHand.y = hand.y;
+
+            if (isGrabbing) {
+                if (grabType === 'platform') {
+                    let pullDx = hand.x - centerX;
+                    let pullDy = hand.y - centerY;
+                    
+                    robot.vx += pullDx * 0.01 * PULL_FORCE;
+                    let pullY = pullDy * 0.01 * PULL_FORCE;
+                    if (pullDy < 0) pullY *= 1.4; 
+                    robot.vy += pullY;
+                    
+                    let bodyDist = Math.sqrt(pullDx*pullDx + pullDy*pullDy);
+                    if(bodyDist > MAX_ARM_LENGTH) {
+                        robot.x += (pullDx / bodyDist) * (bodyDist - MAX_ARM_LENGTH) * 0.5;
+                        robot.y += (pullDy / bodyDist) * (bodyDist - MAX_ARM_LENGTH) * 0.5;
+                    }
+                } 
+            } else {
+                currentGrabSuggestion = checkCanGrab(hand.x, hand.y);
+                if (currentGrabSuggestion.can) {
+                    hand.x = currentGrabSuggestion.x;
+                    hand.y = currentGrabSuggestion.y;
+                }
+            }
+
+            robot.vy += GRAVITY;
+            robot.x += robot.vx;
+            robot.y += robot.vy;
+            robot.vx *= DAMPING;
+            robot.vy *= DAMPING;
+
+            resolveRobotCollisions();
+            updatePhysObjects();
+            
+            if(robot.y > CANVAS_HEIGHT + 200) {
+                robot.x = 300;
+                robot.y = 100;
+                robot.vx = 0;
+                robot.vy = 0;
+            }
+        }
+
+        function getElbow(p1, p2, L) {
+            let dx = p2.x - p1.x;
+            let dy = p2.y - p1.y;
+            let d = Math.sqrt(dx * dx + dy * dy);
+
+            // 두 점이 거의 같은 위치일 경우 분모가 0이 되어 NaN 발생 가능. 이 경우 중간점을 반환.
+            if (d < 0.0001) {
+                return { x: p1.x + dx * 0.5, y: p1.y + dy * 0.5 };
+            }
+
+            if (d >= L) return { x: p1.x + (dx / d) * (L / 2), y: p1.y + (dy / d) * (L / 2) };
+            
+            let l1 = L / 2;
+            let a = d / 2;
+            let h = Math.sqrt(Math.max(0, l1 * l1 - a * a));
+            
+            let cx = p1.x + dx / 2;
+            let cy = p1.y + dy / 2;
+            
+            return {
+                x: cx + h * (dy / d),
+                y: cy - h * (dx / d)
+            };
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.03)';
+            ctx.lineWidth = 1;
+            for(let i=0; i<CANVAS_WIDTH; i+=50) {
+                ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, CANVAS_HEIGHT); ctx.stroke();
+            }
+            for(let i=0; i<CANVAS_HEIGHT; i+=50) {
+                ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(CANVAS_WIDTH, i); ctx.stroke();
+            }
+
+            ctx.fillStyle = '#D6C898';
+            for (let p of platforms) {
+                ctx.fillRect(p.x, p.y, p.w, p.h);
+                ctx.strokeStyle = '#8E7C48';
+                ctx.lineWidth = 4;
+                ctx.strokeRect(p.x, p.y, p.w, p.h);
+            }
+
+            for (let obj of physObjects) {
+                ctx.fillStyle = obj.color;
+                ctx.strokeStyle = '#2D3748';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                if (obj.type === 'circle') {
+                    ctx.arc(obj.x, obj.y, obj.r, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.stroke();
+                } else if (obj.type === 'rect') {
+                    ctx.fillRect(obj.x, obj.y, obj.w, obj.h);
+                    ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
+                    
+                    if(obj.w >= 80) {
+                        ctx.fillStyle = 'rgba(0,0,0,0.2)';
+                        ctx.fillRect(obj.x + 10, obj.y + 10, obj.w - 20, obj.h - 20);
+                    }
+                }
+            }
+
+            let centerX = robot.x + robot.w / 2;
+            let shoulderY = robot.y + 10;
+            let elbow = getElbow({x: centerX, y: shoulderY}, hand, MAX_ARM_LENGTH);
+            
+            ctx.beginPath();
+            ctx.moveTo(centerX, shoulderY);
+            ctx.lineTo(elbow.x, elbow.y);
+            ctx.lineTo(hand.x, hand.y);
+            ctx.strokeStyle = '#718096'; 
+            ctx.lineWidth = 8;
+            ctx.lineJoin = 'round';
+            ctx.lineCap = 'round';
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.arc(elbow.x, elbow.y, 6, 0, Math.PI * 2);
+            ctx.fillStyle = '#2D3748';
+            ctx.fill();
+
+            ctx.save();
+            ctx.translate(hand.x, hand.y);
+            let angle = Math.atan2(hand.y - elbow.y, hand.x - elbow.x);
+            ctx.rotate(angle);
+            
+            if (currentGrabSuggestion.can || isGrabbing) {
+                let currentType = isGrabbing ? grabType : currentGrabSuggestion.type;
+                ctx.fillStyle = currentType === 'object' ? '#F6AD55' : '#48BB78';
+            } else {
+                ctx.fillStyle = '#A0AEC0';
+            }
+            
+            if (isGrabbing) {
+                ctx.fillRect(-5, -8, 15, 16); 
+            } else {
+                ctx.fillRect(-5, -12, 10, 8); 
+                ctx.fillRect(-5, 4, 10, 8);   
+                ctx.fillRect(-10, -4, 10, 8); 
+            }
+            ctx.restore();
+
+            if (currentGrabSuggestion.can && !isGrabbing) {
+                if (currentGrabSuggestion.type === 'object') {
+                    let obj = currentGrabSuggestion.target;
+                    ctx.strokeStyle = '#ED8936';
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    if (obj.type === 'circle') {
+                        ctx.arc(obj.x, obj.y, obj.r + 5, 0, Math.PI * 2);
+                    } else {
+                        ctx.strokeRect(obj.x - 5, obj.y - 5, obj.w + 10, obj.h + 10);
+                    }
+                    ctx.stroke();
+                } else {
+                    ctx.beginPath();
+                    ctx.arc(hand.x, hand.y, 25, 0, Math.PI * 2);
+                    ctx.strokeStyle = 'rgba(72, 187, 120, 0.5)';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            }
+
+            ctx.fillStyle = '#2D3748';
+            ctx.fillRect(robot.x + 5, robot.y + 25, robot.w - 10, 20);
+            
+            ctx.fillStyle = robot.color;
+            ctx.beginPath();
+            ctx.roundRect(robot.x, robot.y, robot.w, 30, 8);
+            ctx.fill();
+
+            ctx.fillStyle = '#2D3748';
+            ctx.beginPath();
+            ctx.arc(centerX, robot.y - 10, 20, 0, Math.PI * 2);
+            ctx.fill();
+
+            let eyeAngle = Math.atan2(mouse.y - (robot.y - 10), mouse.x - centerX);
+            let pupilX = centerX + Math.cos(eyeAngle) * 8;
+            let pupilY = (robot.y - 10) + Math.sin(eyeAngle) * 8;
+            
+            ctx.fillStyle = robot.eyeColor;
+            ctx.beginPath();
+            ctx.arc(pupilX, pupilY, 8, 0, Math.PI * 2);
+            ctx.fill();
+            
+            ctx.fillStyle = 'white';
+            ctx.beginPath();
+            ctx.arc(pupilX + 2, pupilY - 2, 3, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        loop();
+
+    </script>
+</body>
+</html>
