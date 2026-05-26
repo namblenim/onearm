@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>OneArm — Game</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        html,body{height:100%;margin:0;background:#0f1724;color:#e6eef8;font-family:Segoe UI, system-ui, -apple-system, Roboto, 'Noto Sans KR', sans-serif}
+        #gameCanvas{display:block;margin:auto;box-shadow:0 8px 30px rgba(0,0,0,0.6);background:#0f1724}
+        #ui{position:absolute;left:18px;top:18px;pointer-events:none}
+        .key{display:inline-block;background:#334155;padding:4px 8px;border-radius:6px;margin-right:6px;font-weight:600}
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <h2 class="text-2xl font-bold text-sky-300">OneArm — Playtest</h2>
+        <div class="text-sm text-slate-300 mt-2">마우스 이동: 팔 조작 • 좌클릭 유지: 잡기/끌기</div>
+    </div>
+    <canvas id="gameCanvas" width="1280" height="720"></canvas>
+    <script src="js/game.js"></script>
+</body>
+</html>
