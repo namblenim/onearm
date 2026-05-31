@@ -634,23 +634,34 @@ function updatePlayer(dt) {
 
   if (isGrabbing && grabType === 'terrain' && grabbed) {
     const shoulder = getShoulderPoint();
-    const anchorX = handAnchor.active ? handAnchor.x : hand.x;
-    const anchorY = handAnchor.active ? handAnchor.y : hand.y;
+    const rawAnchorX = handAnchor.active ? handAnchor.x : hand.x;
+    const rawAnchorY = handAnchor.active ? handAnchor.y : hand.y;
+
+    // If player is on the ground and the anchor is above the shoulder,
+    // clamp the effective anchor Y to shoulder level so pulling doesn't lift the player.
+    let anchorX = rawAnchorX;
+    let anchorY = rawAnchorY;
+    if (player.onGround && rawAnchorY < shoulder.y) {
+      // clamp slightly below shoulder to preserve a tiny vertical component if desired
+      anchorY = shoulder.y + 2;
+    }
+
     const pullDx = anchorX - shoulder.x;
     const pullDy = anchorY - shoulder.y;
 
     // Prototype-style pull: apply small velocity impulses separately on X/Y
     // scaled by dt to be framerate-independent, with tuned coefficients
     const scale = (dt || 0.016) * 60;
-    const pullXCoef = 0.36; // emphasize horizontal response strongly (increased)
+    const pullXCoef = 0.72; // emphasize horizontal response strongly (doubled)
     const pullYCoef = 0.12;  // vertical pull increased
 
     let vxImpulse = pullDx * 0.01 * PULL_FORCE * pullXCoef * scale;
     let vyImpulse = pullDy * 0.01 * PULL_FORCE * pullYCoef * scale;
 
-    // If player is currently on ground, strongly reduce upward impulse
-    if (player.onGround && vyImpulse < 0) {
-      vyImpulse *= 0.2;
+    // If player is currently on ground and original anchor was above shoulder,
+    // further reduce upward impulse to avoid unintended lift (soft clamp)
+    if (player.onGround && rawAnchorY < shoulder.y && vyImpulse < 0) {
+      vyImpulse *= 0.18; // strong damping for upward component while grounded
     }
 
     player.vx += vxImpulse;
