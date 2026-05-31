@@ -90,8 +90,7 @@
 
         const mouse = { x: 0, y: 0 };
         const hand = { x: 0, y: 0 };
-        // 초기 프레임에서 손 속도(델타) 이상치 방지용으로 prevHand를 현재 위치로 초기화
-        let prevHand = { x: mouse.x, y: mouse.y };
+        let prevHand = { x: 0, y: 0 };
         let handVx = 0;
         let handVy = 0;
 
@@ -136,12 +135,8 @@
         canvas.addEventListener('mouseup', (e) => {
             if (e.button === 0) {
                 if (isGrabbing && grabType === 'object' && grabbedObject) {
-                    // 손 속도가 순간적으로 매우 커지는 경우가 있어 투척 속도를 제한
-                    const MAX_THROW = 50;
-                    let throwVx = Math.max(-MAX_THROW, Math.min(MAX_THROW, handVx));
-                    let throwVy = Math.max(-MAX_THROW, Math.min(MAX_THROW, handVy));
-                    grabbedObject.vx = throwVx * 0.8;
-                    grabbedObject.vy = throwVy * 0.8;
+                    grabbedObject.vx = handVx * 0.8; 
+                    grabbedObject.vy = handVy * 0.8;
                 }
                 isGrabbing = false;
                 grabType = null;
@@ -448,12 +443,7 @@
             let dx = p2.x - p1.x;
             let dy = p2.y - p1.y;
             let d = Math.sqrt(dx * dx + dy * dy);
-
-            // 두 점이 거의 같은 위치일 경우 분모가 0이 되어 NaN 발생 가능. 이 경우 중간점을 반환.
-            if (d < 0.0001) {
-                return { x: p1.x + dx * 0.5, y: p1.y + dy * 0.5 };
-            }
-
+            
             if (d >= L) return { x: p1.x + (dx / d) * (L / 2), y: p1.y + (dy / d) * (L / 2) };
             
             let l1 = L / 2;
