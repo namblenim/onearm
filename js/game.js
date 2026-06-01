@@ -7,6 +7,27 @@ const H = canvas.height;
 const MAP_SRC = 'start.png';
 const HERO_SRC = '주인공.png';
 
+// Map management
+const MAPS = {
+  start: 'start.png',
+  corridor: '복도.png',
+  third: '1-1.png',
+};
+let currentMap = 'start';
+let isTransitioning = false;
+// Smooth corridor transition state
+let transitionActive = false;
+let transitionTimer = 0;
+const transitionDuration = 0.9; // seconds (auto-walk + fade)
+const transitionZoneWidth = 120; // px from right edge to trigger
+const transitionSpeed = 180; // auto-walk px/sec during transition
+// Map enter animation (player appears from left when corridor loads)
+let mapEnterActive = false;
+let mapEnterTimer = 0;
+let mapEnterDuration = 0.6;
+let mapEnterStartX = 0;
+let mapEnterTargetX = 40;
+
 const GRAVITY = 1800;
 const DEBRIS_GRAVITY = 3400;
 const PLAYER_GRAVITY = 1000;
@@ -59,6 +80,12 @@ let gridCols = 0;
 let gridRows = 0;
 let debris = [];
 let staticWalls = [];
+let decorations = [];
+
+// Cutscene: player lens starts dark and then lights up, waking the player
+let cutsceneActive = true;
+let cutsceneTime = 0;
+const cutsceneDuration = 2.2; // seconds
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -75,6 +102,151 @@ function loadImage(src) {
     image.onerror = () => reject(new Error(`Failed to load ${src}`));
     image.src = src;
   });
+}
+
+function snapPlayerToGround() {
+  let bestY = null;
+  for (const wall of staticWalls) {
+    if (player.x + player.w <= wall.x || player.x >= wall.x + wall.w) continue;
+    const candidate = wall.y - player.h;
+    if (bestY === null || candidate > bestY) bestY = candidate;
+  }
+
+  if (bestY !== null) {
+    player.y = bestY;
+    return;
+  }
+
+  for (const item of debris) {
+    if (player.x + player.w <= item.x || player.x >= item.x + item.w) continue;
+    const candidate = item.y - player.h;
+    if (bestY === null || candidate > bestY) bestY = candidate;
+  }
+
+  if (bestY !== null) player.y = bestY;
+}
+
+function resetInputState() {
+  mouseDown = false;
+  holdTimer = 0;
+  isGrabbing = false;
+  grabType = null;
+  grabbed = null;
+  handAnchor.active = false;
+  handAnchor.type = null;
+  handAnchor.target = null;
+  handAnchor.x = 0;
+  handAnchor.y = 0;
+  handVx = 0;
+  handVy = 0;
+}
+
+async function loadMap(key, startX = null, startY = null) {
+  if (!MAPS[key]) throw new Error(`Unknown map key: ${key}`);
+  isTransitioning = true;
+  sceneReady = false;
+  try {
+    const mapImage = await loadImage(MAPS[key]);
+    makeBackground(mapImage);
+    buildGridFromImage(mapImage);
+    buildStaticWalls(key);
+    decorations = [];
+    // decide debris layout per-map
+    debris = key === 'start' ? buildStartDebris() : [];
+
+    if (startX !== null) player.x = startX; else player.x = (key === 'start' ? 560 : 40);
+    // For corridor, default Y should place player on the floor; choose sensible default
+    if (startY !== null) player.y = startY; else player.y = (key === 'start' ? 250 : (H - player.h - 84));
+    player.vx = 0;
+    player.vy = 0;
+
+    snapPlayerToGround();
+
+    hand.x = player.x + player.w + 18;
+    hand.y = player.y + 40;
+    prevHand.x = hand.x;
+    prevHand.y = hand.y;
+
+    currentMap = key;
+    // no cutscene on map transition by default
+    cutsceneActive = (key === 'start');
+    cutsceneTime = 0;
+    sceneReady = true;
+    if (key === 'corridor') {
+      const posterImg = await loadImage('포스터.png').catch(() => null);
+      if (posterImg) {
+        const posterW = 70;
+        const posterH = Math.max(1, Math.round((posterImg.height / posterImg.width) * posterW));
+        const markers = [
+          [0.195, 0.708],
+          [0.399, 0.708],
+          [0.608, 0.708],
+          [0.801, 0.708],
+        ];
+
+        for (const [mx, my] of markers) {
+          decorations.push({
+            img: posterImg,
+            x: Math.round(W * mx - posterW * 0.5),
+            y: Math.round(H * my - posterH * 0.5),
+            w: posterW,
+            h: posterH,
+          });
+        }
+      }
+
+      // ensure player starts off-screen left and plays enter animation
+      mapEnterActive = true;
+      mapEnterTimer = 0;
+      mapEnterDuration = 0.6;
+      mapEnterStartX = -player.w - 8;
+      mapEnterTargetX = startX !== null ? startX : 40;
+      player.x = mapEnterStartX;
+    }
+
+    if (key === 'third') {
+      const [elevatorImg, fuseImg] = await Promise.all([
+        loadImage('elevator.png').catch(() => null),
+        loadImage('fuse.png').catch(() => null),
+      ]);
+
+      if (elevatorImg) {
+        decorations.push({
+          img: elevatorImg,
+          x: 612,
+          y: 502,
+          w: 88,
+          h: 88,
+        });
+      }
+
+      const rebarXs = [212, 438];
+      for (const x of rebarXs) {
+        decorations.push({
+          kind: 'rebar',
+          x,
+          y: 0,
+          w: 8,
+          h: 603,
+        });
+      }
+
+      if (fuseImg) {
+        debris = buildThirdDebris(fuseImg);
+      }
+
+      // Enter the third map from the right side.
+      mapEnterActive = true;
+      mapEnterTimer = 0;
+      mapEnterDuration = 0.6;
+      mapEnterStartX = W + player.w + 8;
+      mapEnterTargetX = W - player.w - 40;
+      player.x = mapEnterStartX;
+    }
+  } catch (e) {
+    loadingError = e instanceof Error ? e.message : String(e);
+  }
+  isTransitioning = false;
 }
 
 function samplePixel(data, width, x, y) {
@@ -249,13 +421,31 @@ function buildGridFromImage(sourceImage) {
   }
 }
 
-function buildStaticWalls() {
-  staticWalls = [
-    { x: 0, y: 0, w: 322, h: H },
-    { x: 322, y: 0, w: 900, h: 84 },
-    { x: 322, y: 603, w: W - 322, h: H - 603 },
-    { x: 1222, y: 0, w: W - 1222, h: 350 },
-  ];
+function buildStaticWalls(mapKey = 'start') {
+  // Build per-map static collision blocks. Defaults match the previous 'start' layout.
+  if (mapKey === 'start') {
+    staticWalls = [
+      { x: 0, y: 0, w: 322, h: H },
+      { x: 322, y: 0, w: 900, h: 84 },
+      { x: 322, y: 603, w: W - 322, h: H - 603 },
+    ];
+    // Keep the right area open so the player can reach the edge for transitions.
+  } else if (mapKey === 'corridor') {
+    // Corridor: open on the left side so player appears from left opening.
+    // Use the same floor Y as the start map to avoid vertical mismatch on transition.
+    staticWalls = [
+      { x: 0, y: 603, w: W, h: H - 603 }, // floor (aligned with start)
+    ];
+  } else if (mapKey === 'third') {
+    // Third map: black areas are solid floor/walls; keep an explicit floor band.
+    staticWalls = [
+      { x: 0, y: 610, w: W, h: H - 610 },
+      { x: 486, y: 547, w: 156, h: 12 },
+    ];
+  } else {
+    // Fallback: empty set
+    staticWalls = [];
+  }
 }
 
 function buildStartDebris() {
@@ -266,7 +456,7 @@ function buildStartDebris() {
     [1100, 380], [1156, 380],
   ];
 
-  return blocks.map(([x, y]) => ({
+  return blocks.slice(0, Math.ceil(blocks.length / 2)).map(([x, y]) => ({
     x,
     y,
     w: 54,
@@ -277,6 +467,21 @@ function buildStartDebris() {
     color: '#a8a8a8',
     shadow: '#707070',
   }));
+}
+
+function buildThirdDebris(fuseImg) {
+  return [{
+    x: 968,
+    y: 614,
+    w: 110,
+    h: 52,
+    vx: 0,
+    vy: 0,
+    held: false,
+    img: fuseImg,
+    color: '#d4a300',
+    shadow: '#8a5f00',
+  }];
 }
 
 function isWallAt(x, y) {
@@ -774,11 +979,31 @@ function drawWallsDebug() {
 function drawDebris() {
   for (const item of debris) {
     ctx.save();
-    ctx.fillStyle = item.color;
-    ctx.strokeStyle = item.shadow;
-    ctx.lineWidth = 2;
-    ctx.fillRect(item.x, item.y, item.w, item.h);
-    ctx.strokeRect(item.x, item.y, item.w, item.h);
+    if (item.img) {
+      ctx.drawImage(item.img, item.x, item.y, item.w, item.h);
+    } else {
+      ctx.fillStyle = item.color;
+      ctx.strokeStyle = item.shadow;
+      ctx.lineWidth = 2;
+      ctx.fillRect(item.x, item.y, item.w, item.h);
+      ctx.strokeRect(item.x, item.y, item.w, item.h);
+    }
+    ctx.restore();
+  }
+}
+
+function drawDecorations() {
+  for (const decoration of decorations) {
+    ctx.save();
+    if (decoration.kind === 'rebar') {
+      ctx.fillStyle = '#9ca3af';
+      ctx.fillRect(decoration.x, decoration.y, decoration.w, decoration.h);
+      ctx.fillStyle = '#6b7280';
+      ctx.fillRect(decoration.x + 2, decoration.y, 2, decoration.h);
+      ctx.fillRect(decoration.x + 4, decoration.y, 1, decoration.h);
+    } else {
+      ctx.drawImage(decoration.img, decoration.x, decoration.y, decoration.w, decoration.h);
+    }
     ctx.restore();
   }
 }
@@ -787,14 +1012,18 @@ function drawPlayer() {
   const facing = player.face >= 0 ? 1 : -1;
   const centerX = player.x + player.w * 0.5;
   const headX = centerX;
-  const headY = player.y + 12;
+  // cutscene-driven display offset (player appears slightly slumped, then rises)
+  const progress = clamp(cutsceneTime / cutsceneDuration, 0, 1);
+  const easeOut = (t) => 1 - Math.pow(1 - t, 2);
+  const drawOffsetY = cutsceneActive ? (1 - easeOut(progress)) * 12 : 0;
+  const headY = player.y + 12 + drawOffsetY;
   const torsoX = player.x + 6;
-  const torsoY = player.y + 38;
+  const torsoY = player.y + 38 + drawOffsetY;
 
   ctx.save();
 
   ctx.fillStyle = '#0f172a';
-  ctx.fillRect(player.x + 10, player.y + 68, player.w - 20, 26);
+  ctx.fillRect(player.x + 10, player.y + 68 + drawOffsetY, player.w - 20, 26);
 
   ctx.fillStyle = '#4f7f92';
   roundRect(ctx, torsoX, torsoY, player.w - 12, 48, 12);
@@ -805,13 +1034,20 @@ function drawPlayer() {
   ctx.arc(headX, headY, 24, 0, Math.PI * 2);
   ctx.fill();
 
+  // Lens light: fade in during cutscene, then stay fully on
+  const lensDelay = 0.5 * cutsceneDuration;
+  const lensT = clamp((cutsceneTime - lensDelay) / Math.max(0.0001, cutsceneDuration - lensDelay), 0, 1);
+  const lensAlpha = cutsceneActive ? Math.pow(lensT, 2) : 1;
+  ctx.save();
+  ctx.globalAlpha = lensAlpha;
   ctx.fillStyle = '#1cb5e0';
   ctx.beginPath();
   ctx.arc(headX + facing * 5, headY - 4, 10, 0, Math.PI * 2);
   ctx.fill();
+  ctx.restore();
 
   const shoulderSideX = facing > 0 ? player.x + player.w - 8 : player.x + 8;
-  const shoulderSideY = player.y + 50;
+  const shoulderSideY = player.y + 50 + drawOffsetY;
   const upperArmLength = 16;
   const forearmLength = 22;
   const reachX = hand.x - shoulderSideX;
@@ -900,9 +1136,70 @@ function update(dt) {
     return;
   }
 
+  // If a startup cutscene is active, advance it and skip gameplay updates
+  if (cutsceneActive) {
+    cutsceneTime += dt;
+    if (cutsceneTime >= cutsceneDuration) {
+      cutsceneActive = false;
+    }
+    return;
+  }
+
+  // If an entering animation is active (player sliding in from left on new map), advance it
+  if (mapEnterActive) {
+    mapEnterTimer += dt;
+    const t = clamp(mapEnterTimer / Math.max(0.0001, mapEnterDuration), 0, 1);
+    const ease = 1 - Math.pow(1 - t, 2);
+    player.x = mapEnterStartX + (mapEnterTargetX - mapEnterStartX) * ease;
+    // keep hand following shoulder while entering
+    hand.x = player.x + player.w + 18;
+    hand.y = player.y + 40;
+    prevHand.x = hand.x;
+    prevHand.y = hand.y;
+
+    if (mapEnterTimer >= mapEnterDuration) {
+      mapEnterActive = false;
+      // Finalize spawn: clear input/velocity and ensure player sits slightly above ground
+      resetInputState();
+      player.vx = 0;
+      player.vy = 0;
+      snapPlayerToGround();
+      // nudge player up a few pixels to avoid immediate penetration
+      player.y = Math.max(0, player.y - 4);
+    }
+
+    return;
+  }
+
   updateHand(dt);
   updatePlayer(dt);
   updateDebris(dt);
+
+  // If we're already performing a corridor transition, advance it (auto-walk + fade)
+  if (transitionActive) {
+    transitionTimer += dt;
+    // auto-walk right to simulate walking through corridor
+    player.x += transitionSpeed * dt;
+
+    if (transitionTimer >= transitionDuration) {
+      transitionActive = false;
+      // finalize by loading the next map with player on left
+      const nextMap = currentMap === 'start' ? 'corridor' : 'third';
+      const nextStartX = nextMap === 'third' ? W - player.w - 40 : 40;
+      loadMap(nextMap, nextStartX).catch((e) => { loadingError = e instanceof Error ? e.message : String(e); });
+      return;
+    }
+    return;
+  }
+
+  // Start a smooth transition when player reaches the right trigger zone
+  if (!isTransitioning && (currentMap === 'start' || currentMap === 'corridor') && player.x > W - transitionZoneWidth && player.onGround) {
+    transitionActive = true;
+    transitionTimer = 0;
+    // disable player interactions
+    resetInputState();
+    return;
+  }
 }
 
 function draw() {
@@ -914,8 +1211,19 @@ function draw() {
   ctx.clearRect(0, 0, W, H);
   drawBackground();
   drawWallsDebug();
+  drawDecorations();
   drawDebris();
   drawPlayer();
+
+  // Draw fade overlay during transition (ease-in)
+  if (transitionActive || isTransitioning) {
+    const t = clamp(transitionTimer / Math.max(0.0001, transitionDuration), 0, 1);
+    const alpha = t * t; // ease-in quadratic
+    ctx.save();
+    ctx.fillStyle = `rgba(0,0,0,${alpha})`;
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
 }
 
 let last = performance.now();
@@ -942,12 +1250,20 @@ canvas.addEventListener('mousedown', (event) => {
     return;
   }
 
+  if (cutsceneActive || transitionActive || isTransitioning || mapEnterActive) {
+    return;
+  }
+
   mouseDown = true;
   holdTimer = 0;
 });
 
 canvas.addEventListener('mouseup', (event) => {
   if (event.button !== 0) {
+    return;
+  }
+
+  if (cutsceneActive || transitionActive || isTransitioning || mapEnterActive) {
     return;
   }
 
@@ -982,25 +1298,7 @@ window.addEventListener('keyup', (event) => {
 
 async function init() {
   try {
-    const mapImage = await loadImage(MAP_SRC);
-    await loadImage(HERO_SRC).catch(() => null);
-
-    makeBackground(mapImage);
-    buildGridFromImage(mapImage);
-    buildStaticWalls();
-    debris = buildStartDebris();
-
-    player.x = 560;
-    player.y = 250;
-    player.vx = 0;
-    player.vy = 0;
-
-    hand.x = player.x + player.w + 18;
-    hand.y = player.y + 40;
-    prevHand.x = hand.x;
-    prevHand.y = hand.y;
-
-    sceneReady = true;
+    await loadMap('start', 560, 250);
   } catch (error) {
     loadingError = error instanceof Error ? error.message : String(error);
   }
